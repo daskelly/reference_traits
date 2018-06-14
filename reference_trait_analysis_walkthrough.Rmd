@@ -29,6 +29,9 @@ for each of the 258 mice. Since the anxiety behaviors and
 hippocampal gene expression are not incompatible measures, we can test how 
 well the reference trait analysis method performs.
 
+Code for this analysis is available at
+[this github repository](https://github.com/daskelly/reference_traits).
+
 
 ## Loading the data
 
