@@ -1,0 +1,180 @@
+---
+title: "Example walkthrough of reference trait analysis"
+date: "last compiled `r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(assertthat)
+library(ggplot2)
+```
+
+
+## Introduction
+
+Reference trait analysis is a method for relating incompatible phenotypes.
+For example, in the study of brain gene expression predisposing drug
+self-administration behaviors in mice, it is impossible to measure
+drug-naive brain gene expression and drug self-administration behaviors
+in the same individual mice. 
+
+In this example we are going succinctly demonstrate how the method works using 
+gene expression and anxiety data from _N_=258 Diversity Outbred mice
+studied in [Logan et al. 2013](https://www.ncbi.nlm.nih.gov/pubmed/23433259).
+In this example dataset, measurements of two separate sets of anxiety-related
+traits and hippocampal gene expression profiles have been collected
+for each of the 258 mice. Since the anxiety behaviors and 
+hippocampal gene expression are not incompatible measures, we can test how 
+well the reference trait analysis method performs.
+
+Code for this analysis is available at
+[this github repository](https://github.com/daskelly/reference_traits).
+
+
+## Loading the data
+
+```{r loading}
+# Open-field and light-dark box testing. 
+# See https://www.ncbi.nlm.nih.gov/pubmed/23433259 for phenotyping details
+of <- read_tsv("open_field_Logan_2013.tsv", col_types=cols(mouse_id="c", .default='d'))
+ld <- read_tsv("light_dark_Logan_2013.tsv", col_types=cols(mouse_id="c", .default='d'))
+
+# Hippocampal gene expression data (RNA-Seq)
+# Data for 17,539 genes in 258 mice.
+# These data have been upper quartile normalized and rankZ transformed.
+expr <- read.csv("hippo_gene_expr.csv.gz", row.names=1)
+```
+
+We transform some of the phenotypes with `log` and `sqrt` to 
+more closely achieve approximate normality:
+
+```{r transformations}
+sqrt_cols <- c("Percent_Time_Center", "Percent_Time_Periphery", "PercentTime_Mobile")
+of[, sqrt_cols] <- sqrt(of[, sqrt_cols])
+of[, "Total_Distance_cm"] <- log(of[, "Total_Distance_cm"])
+```
+
+
+## Examining the data
+
+Let's make a few plots to look at the data.
+
+```{r examine, fig.width=8}
+# Make plots of open-field arena data:
+of_long <- gather(of, "phenotype", "value", -mouse_id)
+ggplot(of_long) + geom_histogram(aes(x=value), bins=50, color="gray") +
+    facet_wrap(~ phenotype, scales='free') + theme_bw(base_size=16)
+
+# Make plots of light-dark box data:
+ld_long <- gather(ld, "phenotype", "value", -mouse_id)
+ggplot(ld_long) + geom_histogram(aes(x=value), bins=50, color='gray') +
+    facet_wrap(~ phenotype, scales='free') + theme_bw(base_size=16)
+```
+All phenotypes look roughly bell shaped.
+
+
+## Removing the effect of sex
+
+We also regress out the effect of sex in an attempt to
+mitigate this known covariate that is not of primary interest.
+
+```{r sexremoval}
+remove_sex <- function(df) {
+  residuals(lm(value ~ sex, data=df))
+}
+ld_corrected <- mutate(ld_long, sex=substring(mouse_id, 1, 1)) %>%
+  group_by(phenotype) %>% nest() %>% 
+  mutate(resid=map(data, remove_sex)) %>% 
+  unnest(data, resid) %>% 
+  select(mouse_id, phenotype, resid) %>%
+  rename("value"="resid")
+
+of_corrected <- mutate(of_long, sex=substring(mouse_id, 1, 1)) %>%
+  group_by(phenotype) %>% nest() %>% 
+  mutate(resid=map(data, remove_sex)) %>% 
+  unnest(data, resid) %>% 
+  select(mouse_id, phenotype, resid) %>%
+  rename("value"="resid")
+```
+
+
+## Splitting the animals into two groups
+
+We call light-dark box traits the reference traits
+and open-field traits the target traits.
+In this example walkthrough, we pretend that we lack gene 
+expression data for _N_/2=129
+animals and we lack open-field data for the other 129 animals.
+
+```{r split}
+set.seed(1)
+grp1 <- sort(sample(1:258, size=129, replace=FALSE))  # training group
+grp2 <- setdiff(1:258, grp1)                          # test group
+
+mouse_ids <- sort(of$mouse_id)
+grp1_ids <- mouse_ids[grp1]
+grp2_ids <- mouse_ids[grp2]
+```
+
+
+## Building the model from training group animals
+
+```{r build}
+of_train <- filter(of, mouse_id %in% grp1_ids) %>% select(-mouse_id)
+ld_train <- filter(ld, mouse_id %in% grp1_ids) %>% select(-mouse_id)
+ccor <- cancor(of_train, ld_train, xcenter=TRUE, ycenter=TRUE)
+```
+
+Let's confirm the correlation for the first canonical variables:
+
+```{r}
+ccor$cor[1]
+of_canonical_variable1 <- as.matrix(of_train) %*% ccor$xcoef[, 1]
+ld_canonical_variable1 <- as.matrix(ld_train) %*% ccor$ycoef[, 1]
+# sanity check:
+are_equal(ccor$cor[1], cor(of_canonical_variable1, ld_canonical_variable1)[1])
+```
+
+
+## Get projected traits from testing group animals
+
+Here we use the canonical correlation model built above to get
+projected reference traits. Specifically, the model above gives us weights
+that we can apply to the reference trait data measured on 
+`grp2` animals to construct projected traits.
+
+```{r}
+ld_test <- filter(ld, mouse_id %in% grp2_ids) %>% select(-mouse_id)
+projected_ref_traits <- as.matrix(ld_test) %*% ccor$ycoef[, 1]
+
+# compare to projection of target traits (open-field)
+# (impossible in typical data but possible here because all animals have all data)
+of_test <- filter(of, mouse_id %in% grp2_ids) %>% select(-mouse_id)
+projected_target_traits <- as.matrix(of_test) %*% ccor$xcoef[, 1]
+
+cor(projected_ref_traits, projected_target_traits)[1]
+```
+
+
+## Finding molecular correlates of projected reference traits
+
+We may compare variation in projected reference traits to
+transcript abundance measurements:
+
+```{r}
+expr_grp2 <- expr[, grp2_ids]
+exprcors <- cor(t(expr_grp2), projected_ref_traits)
+
+head(exprcors)
+```
+
+
+## Session information
+
+```{r sessioninfo}
+devtools::session_info()
+```
+
+
