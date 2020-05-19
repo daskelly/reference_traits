@@ -6,7 +6,7 @@ For a walkthrough example of the analysis, see
 
 A manuscript describing reference trait analysis is 
 available 
-[here](URL).
+[here](https://www.genetics.org/content/212/3/919.abstract).
 
 ### Prerequisites
 
